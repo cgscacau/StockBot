@@ -24,7 +24,7 @@ def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     Cálculo manual do ATR para evitar bug da biblioteca ta.
     """
     if df.empty:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float, index=df.index)
 
     high_low = df["High"] - df["Low"]
     high_close = (df["High"] - df["Close"].shift()).abs()
@@ -89,19 +89,26 @@ def generate_rule_signals(df: pd.DataFrame,
                           slow_ema: int = 21,
                           rr: float = 2.0,
                           atr_mult: float = 1.0) -> pd.DataFrame:
-    """Sinais baseados em cruzamento de EMAs + ATR p/ SL/TP."""
+    """
+    Sinais baseados em cruzamento de EMAs + ATR p/ SL/TP.
+    Implementação vetorizada (sem loop por linha) para evitar erros de index.
+    """
     df = df.copy()
     if df.empty:
-        # garante colunas esperadas, mesmo vazio
+        # garante colunas esperadas mesmo vazio
         for col in ["ema_fast", "ema_slow", "atr", "signal", "direction",
                     "entry", "stop_loss", "take_profit"]:
             df[col] = np.nan
         return df
 
+    # EMAs
     df["ema_fast"] = df["Close"].ewm(span=fast_ema, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=slow_ema, adjust=False).mean()
+
+    # ATR
     df["atr"] = compute_atr(df)
 
+    # Sinal de compra/venda
     df["signal"] = 0
     buy = (df["ema_fast"] > df["ema_slow"]) & (df["ema_fast"].shift(1) <= df["ema_slow"].shift(1))
     sell = (df["ema_fast"] < df["ema_slow"]) & (df["ema_fast"].shift(1) >= df["ema_slow"].shift(1))
@@ -109,35 +116,31 @@ def generate_rule_signals(df: pd.DataFrame,
     df.loc[buy, "signal"] = 1
     df.loc[sell, "signal"] = -1
 
-    df["direction"] = None
+    # Inicializa colunas de trade
+    df["direction"] = "NEUTRAL"
     df["entry"] = np.nan
     df["stop_loss"] = np.nan
     df["take_profit"] = np.nan
 
-    for idx in df.index:
-        sig = df.at[idx, "signal"]
-        if sig == 1:
-            price = df.at[idx, "Close"]
-            atr_val = df.at[idx, "atr"]
-            if pd.isna(atr_val):
-                continue
-            sl = price - atr_mult * atr_val
-            tp = price + rr * (price - sl)
-            df.at[idx, "direction"] = "BUY"
-            df.at[idx, "entry"] = price
-            df.at[idx, "stop_loss"] = sl
-            df.at[idx, "take_profit"] = tp
-        elif sig == -1:
-            price = df.at[idx, "Close"]
-            atr_val = df.at[idx, "atr"]
-            if pd.isna(atr_val):
-                continue
-            sl = price + atr_mult * atr_val
-            tp = price - rr * (sl - price)
-            df.at[idx, "direction"] = "SELL"
-            df.at[idx, "entry"] = price
-            df.at[idx, "stop_loss"] = sl
-            df.at[idx, "take_profit"] = tp
+    # BUY
+    buy_rows = df["signal"] == 1
+    df.loc[buy_rows, "direction"] = "BUY"
+    df.loc[buy_rows, "entry"] = df["Close"]
+    df.loc[buy_rows, "stop_loss"] = df["Close"] - atr_mult * df["atr"]
+    df.loc[buy_rows, "take_profit"] = (
+        df.loc[buy_rows, "entry"] +
+        rr * (df.loc[buy_rows, "entry"] - df.loc[buy_rows, "stop_loss"])
+    )
+
+    # SELL
+    sell_rows = df["signal"] == -1
+    df.loc[sell_rows, "direction"] = "SELL"
+    df.loc[sell_rows, "entry"] = df["Close"]
+    df.loc[sell_rows, "stop_loss"] = df["Close"] + atr_mult * df["atr"]
+    df.loc[sell_rows, "take_profit"] = (
+        df.loc[sell_rows, "entry"] -
+        rr * (df.loc[sell_rows, "stop_loss"] - df.loc[sell_rows, "entry"])
+    )
 
     return df
 
