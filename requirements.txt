@@ -2,3 +2,5 @@ streamlit==1.38.0
 pandas==2.2.3
 yfinance
 plotly==5.24.1
+ta==0.10.2
+numpy==1.24.3
