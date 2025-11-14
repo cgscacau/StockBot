@@ -22,9 +22,19 @@ def carregar_tickers():
 
 @st.cache_data
 def baixar_dados_acoes(tickers, start_date, end_date):
-    """Baixa os dados históricos de fechamento para uma lista de tickers."""
-    dados = yf.download(tickers, start=start_date, end=end_date)['Adj Close']
-    return dados
+    """Baixa os dados históricos de fechamento para uma lista de tickers, individualmente para mais robustez."""
+    dados_combinados = pd.DataFrame()
+    for ticker in tickers:
+        try:
+            ticker_data = yf.Ticker(ticker).history(start=start_date, end=end_date, raise_errors=False)
+            if not ticker_data.empty:
+                ticker_data = ticker_data['Close'].rename(ticker)  # Usa 'Close' em vez de 'Adj Close' para simplicidade
+                dados_combinados = pd.concat([dados_combinados, ticker_data], axis=1)
+            else:
+                st.warning(f"Dados não disponíveis para {ticker} no período selecionado.")
+        except Exception as e:
+            st.error(f"Erro ao baixar dados para {ticker}: {str(e)}")
+    return dados_combinados
 
 # --- Interface do Usuário (Sidebar) ---
 
@@ -39,19 +49,19 @@ with st.sidebar:
         default=['PETR4.SA', 'AAPL']
     )
     
-    data_final_padrao = datetime.now().date()  # Usa .date() para compatibilidade
+    data_final_padrao = datetime.now().date()
     data_inicial_padrao = (datetime.now() - timedelta(days=365)).date()
     
     data_inicial = st.date_input("Data Inicial", value=data_inicial_padrao)
     data_final = st.date_input("Data Final", value=data_final_padrao)
 
-# --- Validação de Datas (Nova Seção para Prevenir Erros) ---
+# --- Validação de Datas ---
 hoje = datetime.now().date()
 if data_inicial > data_final:
     st.error("A Data Inicial não pode ser maior que a Data Final. Por favor, ajuste as datas.")
 elif data_final > hoje:
-    st.warning(f"A Data Final selecionada ({data_final.strftime('%d/%m/%Y')}) está no futuro. Ajustando automaticamente para hoje ({hoje.strftime('%d/%m/%Y')}) para obter dados históricos disponíveis.")
-    data_final = hoje  # Ajusta para hoje
+    st.warning(f"A Data Final selecionada ({data_final.strftime('%d/%m/%Y')}) está no futuro. Ajustando automaticamente para hoje ({hoje.strftime('%d/%m/%Y')}).")
+    data_final = hoje
 
 # --- Lógica Principal e Exibição no Dashboard ---
 
@@ -65,9 +75,9 @@ else:
     
     if dados_acoes.empty:
         st.error("Não foi possível obter dados para as ações e o período selecionado. "
-                 "Verifique: \n- Se os tickers estão corretos (ex: 'PETR4.SA' para ações brasileiras). \n"
-                 "- Se o intervalo de datas inclui dias de negociação (evite fins de semana/feriados ou futuro). \n"
-                 "- Conexão com a internet ou limites da API do Yahoo Finance.")
+                 "Dicas: \n- Verifique se os tickers estão corretos (ex: 'PETR4.SA' para ações brasileiras). \n"
+                 "- Certifique-se de que o intervalo inclui dias de negociação. \n"
+                 "- Pode ser um problema temporário com a API do Yahoo Finance – tente novamente mais tarde.")
     else:
         # --- Seção de Gráficos ---
         st.header("Gráfico de Preços de Fechamento")
@@ -80,7 +90,7 @@ else:
             x='Data', 
             y='Preço', 
             color='Ticker',
-            title='Série Histórica de Preços de Fechamento Ajustado'
+            title='Série Histórica de Preços de Fechamento'
         )
         fig.update_layout(
             xaxis_title="Data",
@@ -112,4 +122,4 @@ else:
                 st.markdown("---")
 
             except Exception as e:
-                st.error(f"Não foi possível obter informações para {ticker}. Erro: {e}")
+                st.error(f"Não foi possível obter informações para {ticker}. Erro: {str(e)}")
