@@ -17,11 +17,30 @@ st.set_page_config(
 
 st.title("📊 Scanner de Oportunidades com Machine Learning & Análise Técnica")
 
+# ========================= FUNÇÕES AUXILIARES =========================
+
+def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    """
+    Cálculo manual do ATR para evitar bug da biblioteca ta.
+    """
+    if df.empty:
+        return pd.Series(dtype=float)
+
+    high_low = df["High"] - df["Low"]
+    high_close = (df["High"] - df["Close"].shift()).abs()
+    low_close = (df["Low"] - df["Close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.rolling(window=length, min_periods=1).mean()
+    return atr
+
+
 # ========================= FUNÇÕES DE DADOS =========================
 
 @st.cache_data(show_spinner=False)
 def get_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
+    if df is None or df.empty:
+        return pd.DataFrame()
     df.dropna(inplace=True)
     return df
 
@@ -29,6 +48,8 @@ def get_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.Dat
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Adiciona indicadores técnicos usados no ML (MACD, DMI, KST, etc.)."""
     df = df.copy()
+    if df.empty:
+        return df
 
     # MACD
     macd_obj = ta.trend.MACD(df["Close"])
@@ -50,9 +71,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["kst"] = kst.kst()
     df["kst_signal"] = kst.kst_sig()
 
-    # ATR
-    atr = ta.volatility.AverageTrueRange(df["High"], df["Low"], df["Close"])
-    df["atr"] = atr.average_true_range()
+    # ATR (manual – sem usar ta.volatility)
+    df["atr"] = compute_atr(df)
 
     # EMAs (para motor tradicional também)
     df["ema_fast"] = df["Close"].ewm(span=9, adjust=False).mean()
@@ -71,11 +91,16 @@ def generate_rule_signals(df: pd.DataFrame,
                           atr_mult: float = 1.0) -> pd.DataFrame:
     """Sinais baseados em cruzamento de EMAs + ATR p/ SL/TP."""
     df = df.copy()
+    if df.empty:
+        # garante colunas esperadas, mesmo vazio
+        for col in ["ema_fast", "ema_slow", "atr", "signal", "direction",
+                    "entry", "stop_loss", "take_profit"]:
+            df[col] = np.nan
+        return df
+
     df["ema_fast"] = df["Close"].ewm(span=fast_ema, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=slow_ema, adjust=False).mean()
-
-    atr = ta.volatility.AverageTrueRange(df["High"], df["Low"], df["Close"])
-    df["atr"] = atr.average_true_range()
+    df["atr"] = compute_atr(df)
 
     df["signal"] = 0
     buy = (df["ema_fast"] > df["ema_slow"]) & (df["ema_fast"].shift(1) <= df["ema_slow"].shift(1))
@@ -94,6 +119,8 @@ def generate_rule_signals(df: pd.DataFrame,
         if sig == 1:
             price = df.at[idx, "Close"]
             atr_val = df.at[idx, "atr"]
+            if pd.isna(atr_val):
+                continue
             sl = price - atr_mult * atr_val
             tp = price + rr * (price - sl)
             df.at[idx, "direction"] = "BUY"
@@ -103,6 +130,8 @@ def generate_rule_signals(df: pd.DataFrame,
         elif sig == -1:
             price = df.at[idx, "Close"]
             atr_val = df.at[idx, "atr"]
+            if pd.isna(atr_val):
+                continue
             sl = price + atr_mult * atr_val
             tp = price - rr * (sl - price)
             df.at[idx, "direction"] = "SELL"
@@ -120,6 +149,9 @@ def backtest_rule(df: pd.DataFrame,
     Ignora SL/TP intradiário (mantém até próximo sinal).
     """
     df = df.copy()
+    if df.empty:
+        return {"total_return": 0.0, "max_drawdown": 0.0, "equity_curve": []}
+
     df["ret"] = df["Close"].pct_change().fillna(0)
 
     position = 0  # 1 comprado, -1 vendido
@@ -142,19 +174,18 @@ def backtest_rule(df: pd.DataFrame,
         equity_curve.append(equity)
 
     equity_curve = np.array(equity_curve)
-    total_return = (equity_curve[-1] / initial_capital) - 1 if len(equity_curve) else 0
-
-    # Drawdown
     if len(equity_curve):
+        total_return = (equity_curve[-1] / initial_capital) - 1
         cummax = np.maximum.accumulate(equity_curve)
         drawdown = (equity_curve - cummax) / cummax
         max_dd = drawdown.min()
     else:
-        max_dd = 0
+        total_return = 0.0
+        max_dd = 0.0
 
     return {
-        "total_return": total_return,
-        "max_drawdown": max_dd,
+        "total_return": float(total_return),
+        "max_drawdown": float(max_dd),
         "equity_curve": equity_curve
     }
 
@@ -165,6 +196,9 @@ def optimize_rule(df: pd.DataFrame,
                   rr_list,
                   atr_list):
     """Grid search simples sobre os parâmetros do motor tradicional."""
+    if df.empty:
+        return None, None, None
+
     best_metric = -1e9
     best_params = None
     best_result = None
@@ -190,10 +224,15 @@ def optimize_rule(df: pd.DataFrame,
 def prepare_ml_dataset(df: pd.DataFrame, lookback: int = 10):
     """Prepara dados com indicadores e janelas temporais."""
     df = add_indicators(df)
+    if df.empty:
+        return df, [], None, None, None, None, None
 
     # Target: 1 se fechar amanhã acima de hoje
     df["target"] = (df["Close"].shift(-1) > df["Close"]).astype(int)
     df.dropna(inplace=True)
+
+    if df.empty:
+        return df, [], None, None, None, None, None
 
     feature_cols = [c for c in df.columns if c not in ["target"]]
     X_full = df[feature_cols].values
@@ -207,6 +246,9 @@ def prepare_ml_dataset(df: pd.DataFrame, lookback: int = 10):
     for i in range(len(X_scaled) - lookback):
         X_seq.append(X_scaled[i:i+lookback])
         y_seq.append(y_full[i+lookback])
+
+    if not X_seq:
+        return df, feature_cols, scaler, X_scaled, y_full, None, None
 
     X_seq = np.array(X_seq)
     y_seq = np.array(y_seq)
@@ -266,7 +308,7 @@ def ml_predict_last(df_raw: pd.DataFrame,
     """
     df, feature_cols, scaler, X_scaled, y_full, X_seq, y_seq = prepare_ml_dataset(df_raw, lookback)
 
-    if len(X_seq) < 5:
+    if X_seq is None or X_scaled is None or X_scaled.size == 0:
         return None, None
 
     # separa último ponto para previsão
@@ -277,7 +319,7 @@ def ml_predict_last(df_raw: pd.DataFrame,
     pesos = []
 
     # GRU
-    if use_gru:
+    if use_gru and y_seq is not None:
         gru_model = train_lstm_gru(X_seq, y_seq, model_type="GRU")
         if gru_model is not None:
             p_gru = float(gru_model.predict(X_last_seq)[0][0])
@@ -285,7 +327,7 @@ def ml_predict_last(df_raw: pd.DataFrame,
             pesos.append(0.5)   # maior peso (card diz GRU > LSTM)
 
     # LSTM
-    if use_lstm:
+    if use_lstm and y_seq is not None:
         lstm_model = train_lstm_gru(X_seq, y_seq, model_type="LSTM")
         if lstm_model is not None:
             p_lstm = float(lstm_model.predict(X_last_seq)[0][0])
@@ -319,17 +361,19 @@ def ml_signal_to_trade(prob_up: float,
                        buy_th: float = 0.6,
                        sell_th: float = 0.4):
     """Transforma probabilidade em direção/entrada/SL/TP."""
-    direction = "NEUTRAL"
-    if prob_up is None:
+    if prob_up is None or last_row is None:
         return None
 
+    direction = "NEUTRAL"
     if prob_up >= buy_th:
         direction = "BUY"
     elif prob_up <= sell_th:
         direction = "SELL"
 
     price = last_row["Close"]
-    atr_val = last_row["atr"]
+    atr_val = last_row.get("atr", np.nan)
+    if pd.isna(atr_val):
+        atr_val = compute_atr(last_row.to_frame().T).iloc[-1]
 
     if direction == "BUY":
         sl = price - atr_mult * atr_val
@@ -342,9 +386,9 @@ def ml_signal_to_trade(prob_up: float,
 
     return {
         "direction": direction,
-        "entry": price,
-        "stop_loss": sl,
-        "take_profit": tp
+        "entry": float(price),
+        "stop_loss": float(sl) if sl is not None else None,
+        "take_profit": float(tp) if tp is not None else None
     }
 
 
@@ -394,6 +438,8 @@ with tab1:
 
         for t in tickers:
             df_raw = get_history(t, period=period, interval=interval)
+            if df_raw.empty:
+                continue
 
             # Motor tradicional
             rule_row = {}
@@ -413,15 +459,16 @@ with tab1:
             ml_row = {}
             if engine != "Tradicional (EMAs)":
                 prob_up, last_row = ml_predict_last(df_raw, lookback=lookback)
-                if prob_up is not None:
+                if prob_up is not None and last_row is not None:
                     trade = ml_signal_to_trade(prob_up, last_row, rr=rr, atr_mult=atr_mult)
-                    ml_row = {
-                        "ml_prob_up": prob_up,
-                        "ml_direction": trade["direction"],
-                        "ml_entry": trade["entry"],
-                        "ml_sl": trade["stop_loss"],
-                        "ml_tp": trade["take_profit"]
-                    }
+                    if trade is not None:
+                        ml_row = {
+                            "ml_prob_up": prob_up,
+                            "ml_direction": trade["direction"],
+                            "ml_entry": trade["entry"],
+                            "ml_sl": trade["stop_loss"],
+                            "ml_tp": trade["take_profit"]
+                        }
 
             combined = {"Ticker": t}
             combined.update(rule_row)
@@ -430,7 +477,6 @@ with tab1:
 
         if rows:
             df_res = pd.DataFrame(rows)
-            # Formatação
             if "ml_prob_up" in df_res.columns:
                 df_res["ml_prob_up"] = (df_res["ml_prob_up"] * 100).round(2)
             st.dataframe(df_res)
@@ -453,34 +499,40 @@ with tab2:
 
     if ticker_bt and st.button("Rodar Backtest Tradicional"):
         df_raw = get_history(ticker_bt, period=period, interval=interval)
-
-        if do_opt:
-            with st.spinner("Otimizando parâmetros..."):
-                params, res, metric = optimize_rule(
-                    df_raw,
-                    ema_fast_list=range(5, 15),
-                    ema_slow_list=range(15, 40, 2),
-                    rr_list=[1.5, 2.0, 2.5],
-                    atr_list=[0.5, 1.0, 1.5]
-                )
-            f, s, rr_best, am_best = params
-            st.success(f"Melhor combinação: EMA_f={f}, EMA_s={s}, RR={rr_best}, ATR_mult={am_best:.1f}")
-            st.write(f"Retorno total: {res['total_return']*100:.2f}%")
-            st.write(f"Max Drawdown: {res['max_drawdown']*100:.2f}%")
-
+        if df_raw.empty:
+            st.warning("Sem dados para este ticker/período.")
         else:
-            df_sig = generate_rule_signals(df_raw, fast_ema=ema_fast,
-                                           slow_ema=ema_slow,
-                                           rr=rr,
-                                           atr_mult=atr_mult)
-            res = backtest_rule(df_sig)
-            st.write(f"Retorno total: {res['total_return']*100:.2f}%")
-            st.write(f"Max Drawdown: {res['max_drawdown']*100:.2f}%")
+            if do_opt:
+                with st.spinner("Otimizando parâmetros..."):
+                    params, res, metric = optimize_rule(
+                        df_raw,
+                        ema_fast_list=range(5, 15),
+                        ema_slow_list=range(15, 40, 2),
+                        rr_list=[1.5, 2.0, 2.5],
+                        atr_list=[0.5, 1.0, 1.5]
+                    )
+                if params is None:
+                    st.warning("Não foi possível otimizar parâmetros.")
+                else:
+                    f, s, rr_best, am_best = params
+                    st.success(f"Melhor combinação: EMA_f={f}, EMA_s={s}, RR={rr_best}, ATR_mult={am_best:.1f}")
+                    st.write(f"Retorno total: {res['total_return']*100:.2f}%")
+                    st.write(f"Max Drawdown: {res['max_drawdown']*100:.2f}%")
 
-        # Curva de capital
-        if res and len(res["equity_curve"]):
-            eq = pd.Series(res["equity_curve"])
-            st.line_chart(eq)
+                    if res and len(res["equity_curve"]):
+                        eq = pd.Series(res["equity_curve"])
+                        st.line_chart(eq)
+            else:
+                df_sig = generate_rule_signals(df_raw, fast_ema=ema_fast,
+                                               slow_ema=ema_slow,
+                                               rr=rr,
+                                               atr_mult=atr_mult)
+                res = backtest_rule(df_sig)
+                st.write(f"Retorno total: {res['total_return']*100:.2f}%")
+                st.write(f"Max Drawdown: {res['max_drawdown']*100:.2f}%")
+                if res and len(res["equity_curve"]):
+                    eq = pd.Series(res["equity_curve"])
+                    st.line_chart(eq)
 
 
 # ========================= TAB 3: DETALHE MACHINE LEARNING =========================
@@ -491,26 +543,30 @@ with tab3:
 
     if ticker_ml and st.button("Rodar ML para este ticker"):
         df_raw = get_history(ticker_ml, period=period, interval=interval)
-        prob_up, last_row = ml_predict_last(df_raw, lookback=lookback)
-
-        if prob_up is None:
-            st.warning("Poucos dados ou erro ao treinar modelos.")
+        if df_raw.empty:
+            st.warning("Sem dados para este ticker/período.")
         else:
-            trade = ml_signal_to_trade(prob_up, last_row, rr=rr, atr_mult=atr_mult)
+            prob_up, last_row = ml_predict_last(df_raw, lookback=lookback)
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Probabilidade de Alta (ensemble GRU/LSTM/RF)",
-                          f"{prob_up*100:.2f}%")
-            with col2:
-                st.metric("Direção sugerida", trade["direction"])
+            if prob_up is None or last_row is None:
+                st.warning("Poucos dados ou erro ao treinar modelos.")
+            else:
+                trade = ml_signal_to_trade(prob_up, last_row, rr=rr, atr_mult=atr_mult)
 
-            st.markdown("### Níveis sugeridos")
-            st.write(f"Entrada: **{trade['entry']:.2f}**")
-            if trade["stop_loss"] is not None:
-                st.write(f"Stop Loss: **{trade['stop_loss']:.2f}**")
-                st.write(f"Take Profit: **{trade['take_profit']:.2f}**")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Probabilidade de Alta (ensemble GRU/LSTM/RF)",
+                              f"{prob_up*100:.2f}%")
+                with col2:
+                    st.metric("Direção sugerida", trade["direction"])
 
-            st.markdown("### Últimos candles com indicadores")
-            df_ind = add_indicators(df_raw).tail(60)
-            st.dataframe(df_ind[["Close", "macd", "macd_signal", "rsi", "adx", "kst", "kst_signal"]])
+                st.markdown("### Níveis sugeridos")
+                st.write(f"Entrada: **{trade['entry']:.2f}**")
+                if trade["stop_loss"] is not None:
+                    st.write(f"Stop Loss: **{trade['stop_loss']:.2f}**")
+                    st.write(f"Take Profit: **{trade['take_profit']:.2f}**")
+
+                st.markdown("### Últimos candles com indicadores")
+                df_ind = add_indicators(df_raw).tail(60)
+                st.dataframe(df_ind[["Close", "macd", "macd_signal",
+                                     "rsi", "adx", "kst", "kst_signal"]])
