@@ -2,7 +2,6 @@ streamlit
 yfinance
 pandas
 numpy
+scikit-learn
 ta
-plotly
-matplotlib
-seaborn
+tensorflow
