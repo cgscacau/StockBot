@@ -19,18 +19,19 @@ def compute_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
 
 
 # ========================= HISTÓRICO =========================
-def get_history(ticker: str, period: str = "1y", interval: str = "1d"):
-    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
+import streamlit as st
 
+@st.cache_data(show_spinner=False)
+def get_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True)
     if df is None or df.empty:
         return pd.DataFrame()
-
-    df = df.copy()
     df.dropna(inplace=True)
     return df
 
 
 # ========================= INDICADORES =========================
+@st.cache_data(show_spinner=False)
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if df.empty:
@@ -38,10 +39,10 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     # MACD
     try:
-        macd = ta.trend.MACD(df["Close"])
-        df["macd"] = macd.macd()
-        df["macd_signal"] = macd.macd_signal()
-        df["macd_hist"] = macd.macd_diff()
+        macd_obj = ta.trend.MACD(df["Close"])
+        df["macd"] = macd_obj.macd()
+        df["macd_signal"] = macd_obj.macd_signal()
+        df["macd_hist"] = macd_obj.macd_diff()
     except Exception:
         df["macd"] = np.nan
         df["macd_signal"] = np.nan
@@ -73,12 +74,13 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         df["kst"] = np.nan
         df["kst_signal"] = np.nan
 
-    # EMAs
+    # ATR manual
+    df["atr"] = compute_atr(df)
+
+    # EMAs para o motor tradicional
     df["ema_fast"] = df["Close"].ewm(span=9, adjust=False).mean()
     df["ema_slow"] = df["Close"].ewm(span=21, adjust=False).mean()
 
-    # ATR
-    df["atr"] = compute_atr(df)
-
     df.dropna(inplace=True)
     return df
+
