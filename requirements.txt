@@ -4,3 +4,7 @@ yfinance
 plotly
 ta
 numpy
+scikit-learn
+tensorflow
+cvxpy
+scipy
