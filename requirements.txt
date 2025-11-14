@@ -2,7 +2,7 @@ streamlit
 yfinance
 pandas
 numpy
-ta==0.10.2
+ta
 plotly
 matplotlib
 seaborn
