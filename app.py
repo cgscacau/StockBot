@@ -125,4 +125,3 @@ else:
 
             except Exception as e:
                 st.error(f"Não foi possível obter informações para {ticker}. Erro: {e}")
-
